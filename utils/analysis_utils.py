@@ -216,16 +216,44 @@ def create_duplicated_df(df:pd.DataFrame,
     Return: Pandas dataframe
     """
     
-    df_duplicated_arr = df[df.duplicated(col) == True][col].unique()
+    df_duplicated_arr = df[df.duplicated(col)][col].unique()
     print(f"Total number of duplicated {col} is {len(df_duplicated_arr)}")
     
     if b_show:
         print(df_duplicated_arr)
 
-    df_duplicates = df[df[col].isin(df_duplicated_arr)==True].sort_values(by = col)
+    df_duplicates = df[df[col].isin(df_duplicated_arr)].sort_values(by = col)
 
     return df_duplicates
 
+def create_duplicated_dropped_df(df: pd.DataFrame, unique_id: str, keep_record_option: str = "first") -> pd.DataFrame:
+    """
+    Processes a DataFrame to remove duplicates based on a specified column, allowing the option to keep either the
+    first, last, or no duplicate entries.
+
+    Arguments:
+    - df (pd.DataFrame): The DataFrame from which duplicates need to be removed.
+    - unique_id (str): The name of the column based on which duplicates will be identified.
+    - keep_record_option (str, optional): Specifies which duplicate record to keep. 
+      Can be 'first', 'last', or False (to drop all duplicates). Defaults to 'first'.
+
+    Returns:
+    - pd.DataFrame: A new DataFrame with duplicates removed as per the specified options.
+    
+    """
+    # Identify all duplicated entries based on the unique_id
+    df_dup = create_duplicated_df(df, unique_id)
+    
+    # Filter out all entries that are not duplicated
+    df_nodup = df.loc[df[unique_id].isin(df_dup[unique_id].unique()) == False]
+    
+    # From the duplicated entries, drop duplicates as per the keep_record_option
+    df_dup_fix = df_dup.drop_duplicates(subset=[unique_id], keep=keep_record_option)
+    
+    # Concatenate the non-duplicated entries and the fixed duplicates
+    df_clean = pd.concat([df_nodup, df_dup_fix], axis=0)
+    
+    return df_clean
 
 def create_gb_aggs_df(df:pd.DataFrame,
                       gb_cols:List[str],
