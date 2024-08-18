@@ -23,7 +23,8 @@ import scipy
 # sklearn
 from sklearn.linear_model import LinearRegression
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import PolynomialFeatures
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.metrics import mean_squared_error
 
 # Visualization imports
 import matplotlib.pyplot as plt
@@ -33,7 +34,8 @@ import seaborn as sns
 from google.cloud import bigquery, storage
 import google.cloud
 
-def check_data(df:pd.DataFrame) -> None:
+
+def check_data(df:pd.DataFrame, unique_id:str) -> None:
     """
     Input: Pandas dataframe
     
@@ -48,8 +50,15 @@ def check_data(df:pd.DataFrame) -> None:
     print('-------- 3. Unique Values --------')
     print(print_col_uniques(df))
     print('\n')
+    print('-------- 4. Checking Duplicates --------')
+    df_dup = create_duplicated_df(df, unique_id)
+    
+    if df_dup.shape[0] > 0 :
+        print(f"There are {df_dup.shape[0]} duplicates found with {unique_id}. Check the raw data!!")
+    else:
+        print(f"No duplicates found with {unique_id}")
 
-
+        
 def convert_to_datetime_type(df:pd.DataFrame, time_cols:List[str]) -> None:
     """ 
     Context: Sometimes pandas read time column with an object/str type
