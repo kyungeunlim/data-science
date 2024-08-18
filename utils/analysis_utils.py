@@ -58,7 +58,7 @@ def check_data(df:pd.DataFrame, unique_id:str) -> None:
     else:
         print(f"No duplicates found with {unique_id}")
 
-        
+
 def convert_to_datetime_type(df:pd.DataFrame, time_cols:List[str]) -> None:
     """ 
     Context: Sometimes pandas read time column with an object/str type
