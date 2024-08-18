@@ -23,7 +23,8 @@ import scipy
 # sklearn
 from sklearn.linear_model import LinearRegression
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import PolynomialFeatures
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.metrics import mean_squared_error
 
 # Visualization imports
 import matplotlib.pyplot as plt
@@ -33,7 +34,8 @@ import seaborn as sns
 from google.cloud import bigquery, storage
 import google.cloud
 
-def check_data(df:pd.DataFrame) -> None:
+
+def check_data(df:pd.DataFrame, unique_id:str) -> None:
     """
     Input: Pandas dataframe
     
@@ -48,6 +50,13 @@ def check_data(df:pd.DataFrame) -> None:
     print('-------- 3. Unique Values --------')
     print(print_col_uniques(df))
     print('\n')
+    print('-------- 4. Checking Duplicates --------')
+    df_dup = create_duplicated_df(df, unique_id)
+    
+    if df_dup.shape[0] > 0 :
+        print(f"There are {df_dup.shape[0]} duplicates found with {unique_id}. Check the raw data!!")
+    else:
+        print(f"No duplicates found with {unique_id}")
 
 
 def convert_to_datetime_type(df:pd.DataFrame, time_cols:List[str]) -> None:
@@ -207,16 +216,44 @@ def create_duplicated_df(df:pd.DataFrame,
     Return: Pandas dataframe
     """
     
-    df_duplicated_arr = df[df.duplicated(col) == True][col].unique()
+    df_duplicated_arr = df[df.duplicated(col)][col].unique()
     print(f"Total number of duplicated {col} is {len(df_duplicated_arr)}")
     
     if b_show:
         print(df_duplicated_arr)
 
-    df_duplicates = df[df[col].isin(df_duplicated_arr)==True].sort_values(by = col)
+    df_duplicates = df[df[col].isin(df_duplicated_arr)].sort_values(by = col)
 
     return df_duplicates
 
+def create_duplicated_dropped_df(df: pd.DataFrame, unique_id: str, keep_record_option: str = "first") -> pd.DataFrame:
+    """
+    Processes a DataFrame to remove duplicates based on a specified column, allowing the option to keep either the
+    first, last, or no duplicate entries.
+
+    Args:
+    - df (pd.DataFrame): The DataFrame from which duplicates need to be removed.
+    - unique_id (str): The name of the column based on which duplicates will be identified.
+    - keep_record_option (str, optional): Specifies which duplicate record to keep. 
+      Can be 'first', 'last', or False (to drop all duplicates). Defaults to 'first'.
+
+    Returns:
+    - pd.DataFrame: A new DataFrame with duplicates removed as per the specified options.
+    
+    """
+    # Identify all duplicated entries based on the unique_id
+    df_dup = create_duplicated_df(df, unique_id)
+    
+    # Filter out all entries that are not duplicated
+    df_nodup = df.loc[df[unique_id].isin(df_dup[unique_id].unique()) == False]
+    
+    # From the duplicated entries, drop duplicates as per the keep_record_option
+    df_dup_fix = df_dup.drop_duplicates(subset=[unique_id], keep=keep_record_option)
+    
+    # Concatenate the non-duplicated entries and the fixed duplicates
+    df_clean = pd.concat([df_nodup, df_dup_fix], axis=0)
+    
+    return df_clean
 
 def create_gb_aggs_df(df:pd.DataFrame,
                       gb_cols:List[str],
@@ -598,6 +635,270 @@ def load_bq_table_from_df(df:pd.DataFrame,
     # Load data to BQ
     job = client.load_table_from_dataframe(df, table)        
         
+
+def normalize_features(X_train: pd.DataFrame, 
+                       X_test: pd.DataFrame, 
+                       cols_to_normalize: List[str],
+                       b_drop_norm_cols: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame, StandardScaler]:
+    """
+    Normalize the specified features in the given DataFrames using standard scaling. This method scales the features 
+    of the input DataFrames to have zero mean and unit variance. 
+
+    Args:
+    - X_train (pd.DataFrame): The training DataFrame containing features to be normalized.
+    - X_test (pd.DataFrame): The test DataFrame containing features to be normalized.
+    - cols_to_normalize (List[str]): List of column names to be normalized.
+    - b_drop_norm_cols (bool): Option to drop the original column used to normalize in the final returning dataframe
+
+    Returns:
+    - tuple: A tuple containing three elements:
+        1. pd.DataFrame: The training DataFrame with the normalized features.
+        2. pd.DataFrame: The test DataFrame with the normalized features.
+        3. StandardScaler: The scaler object used for normalization, which can be used later to apply the same scaling to other data sets (e.g., during model evaluation).
+    """
+    
+    scaler = StandardScaler()
+    X_train_norm_subset = scaler.fit_transform(X_train[cols_to_normalize])
+    X_test_norm_subset = scaler.transform(X_test[cols_to_normalize])
+    
+    # Create copies of the original DataFrames to avoid modifying them directly
+    X_train_normalized = X_train.copy()
+    X_test_normalized = X_test.copy()
+    
+    # Add normalized columns to the DataFrames
+    norm_col_names = []
+    for i, col in enumerate(cols_to_normalize):
+        norm_col_name = f"{col}_norm"
+        X_train_normalized[norm_col_name] = X_train_norm_subset[:, i]
+        X_test_normalized[norm_col_name] = X_test_norm_subset[:, i]
+        norm_col_names.append(norm_col_name)
+    
+    # Drop the original columns if specified
+    if b_drop_norm_cols:
+        X_train_normalized.drop(columns=cols_to_normalize, inplace=True)
+        X_test_normalized.drop(columns=cols_to_normalize, inplace=True)
+    
+    # Reorder columns: normalized columns first, then the rest
+    non_norm_cols_train = [col for col in X_train_normalized.columns if col not in norm_col_names]
+    ordered_columns_train = norm_col_names + non_norm_cols_train
+    X_train_normalized = X_train_normalized[ordered_columns_train]
+    
+    non_norm_cols_test = [col for col in X_test_normalized.columns if col not in norm_col_names]
+    ordered_columns_test = norm_col_names + non_norm_cols_test
+    X_test_normalized = X_test_normalized[ordered_columns_test]
+    
+    return X_train_normalized, X_test_normalized, scaler
+
+
+def plot_display_pol_fit(df, x_cols, y_col, degree=1, x_col_lr_plot=None):
+    """
+    Perform linear or polynomial regression and plot the results.
+
+    Args:
+        df (pd.DataFrame): The input data frame containing the predictors and response variable.
+        x_cols (list of str): List of column names to be used as predictors.
+        y_col (str): The column name of the response variable.
+        degree (int, optional): The degree of the polynomial for regression. Default is 1 (linear regression).
+        x_col_lr_plot (str, optional): The column name to be used for plotting in the multivariate case. Default is None.
+
+    Returns:
+        None. Displays a plot of the regression results and prints the model parameters and evaluation metrics.
+    """    
+    
+    # Define the response (y)
+    y = df[y_col].values  # Response variable
+
+    # Define the predictors (X)
+    if len(x_cols) == 1:
+        X = df[x_cols[0]].values.reshape(-1, 1)  # Reshape to ensure it's a 2D array
+    else:
+        X = df[x_cols].values  # Predictors
+
+    # Create and fit the model
+    if degree == 0:
+        model = LinearRegression(fit_intercept=True)
+        X = np.ones_like(X)  # Use a single column of ones
+        model.fit(X, y)
+        coefficients = []
+        intercept = model.intercept_
+    else:
+        model = Pipeline([
+            ('poly', PolynomialFeatures(degree=degree)),
+            ('linear', LinearRegression(fit_intercept=True))
+        ])
+        model.fit(X, y)
+        linear_model = model.named_steps['linear']
+        coefficients = linear_model.coef_
+        intercept = linear_model.intercept_
+
+    # Predict the response
+    y_pred = model.predict(X)
+
+    # Calculate R-squared and RMSE
+    r_squared = model.score(X, y)
+    rmse = np.sqrt(mean_squared_error(y, y_pred))
+
+    # Plotting the original data and the regression line
+    plt.figure(figsize=(10, 6))
+    
+    if len(x_cols) == 1:
+        # Univariate case
+        sns.scatterplot(x=df[x_cols[0]], y=df[y_col])
+        sorted_indices = np.argsort(df[x_cols[0]])
+        plt.plot(df[x_cols[0]].iloc[sorted_indices], y_pred[sorted_indices], color='red', label=f'{degree}-degree Polynomial fit')
+        plt.xlabel(x_cols[0])
+    else:
+        # Multivariate case: plot only against the specified predictor
+        if x_col_lr_plot is None:
+            x_col_lr_plot = x_cols[0]
+        sns.scatterplot(x=df[x_col_lr_plot], y=df[y_col])
+        plt.plot(df[x_col_lr_plot], y_pred, color='red', label='Regression line')
+        plt.xlabel(x_col_lr_plot)
+        
+    plt.ylabel(y_col)
+    plt.title('Linear Regression Analysis')
+    plt.legend()
+    plt.show()        
+        
+    # Print the results
+    print(f"# of Data Samples: {df.shape[0]}")
+    print(f"Intercept: {intercept}")
+    if degree == 0:
+        print("Model is a constant fit with intercept only.")
+    else:
+        if degree == 1 or len(x_cols) > 1:
+            for i, col in enumerate(x_cols):
+                print(f"Slope for {col}: {coefficients[i+1]}")
+        else:
+            for i in range(degree + 1):
+                print(f"Coefficient for degree {i}: {coefficients[i]}")
+    print(f"R-squared: {r_squared}")
+    print(f"RMSE: {round(rmse, 3)}")
+
+
+def plot_fit_2d_hist(df, x, y, xbinsize=20, xlabel='', ylabel='', fig_size=(10, 6), y_range=[0, 5e5],
+                     b_show_lr_fit_median=True, pol_degree=3, b_show_pol_fit_mean=True, b_show_pol_fit_median=True,
+                     b_save=False, savefig_name="test.png", b_show_min=False, b_show_max=False, b_show_25=False, b_show_75=False):
+    """
+    Plot a 2D histogram with median, mean, and optional polynomial fits.
+
+    Args:
+        - df (pd.DataFrame): DataFrame containing the data.
+        - x (str): Column name for the x-axis data.
+        - y (str): Column name for the y-axis data.
+        - xbinsize (int, optional): Size of the bins along the x-axis. Default is 20.
+        - xlabel (str, optional): Label for the x-axis. Default is an empty string.
+        - ylabel (str, optional): Label for the y-axis. Default is an empty string.
+        - fig_size (tuple, optional): Size of the figure. Default is (10, 6).
+        - y_range (list, optional): Range for the y-axis. Default is [0, 5e5].
+        - b_show_lr_fit_median (bool, optional): Whether to show linear fit for the median. Default is True.
+        - pol_degree (int, optional): Degree of the polynomial for fitting. Default is 3.
+        - b_show_pol_fit_mean (bool, optional): Whether to show polynomial fit for the mean. Default is True.
+        - b_show_pol_fit_median (bool, optional): Whether to show polynomial fit for the median. Default is True.
+        - b_save (bool, optional): Whether to save the figure. Default is False.
+        - savefig_name (str, optional): Name of the file to save the figure. Default is "test.png".
+        - b_show_min (bool, optional): Whether to show the minimum value for each bin. Default is False.
+        - b_show_max (bool, optional): Whether to show the maximum value for each bin. Default is False.
+        - b_show_25 (bool, optional): Whether to show the 25th percentile for each bin. Default is False.
+        - b_show_75 (bool, optional): Whether to show the 75th percentile for each bin. Default is False.
+
+    Returns:
+        tuple: Arrays of x points, polynomial predictions for mean and median, RMSE for mean and median, mean and median coefficients.
+    """
+
+    def scatter_points(x_pts, values, color, marker, label=None, alpha=0.8):
+        """ Helper function to scatter plot points with optional labels. """
+        if label:
+            plt.scatter([], [], c=color, marker=marker, alpha=alpha, label=label)
+        plt.scatter(x_pts, values, c=color, marker=marker, alpha=alpha)
+
+    # Clean the data
+    df = df[[x, y]].dropna()
+    df = df[np.isfinite(df[x]) & np.isfinite(df[y])]
+    df[f'{x}_class'] = df[x] // xbinsize
+
+    plt.figure(figsize=fig_size)
+    plt.scatter(df[x], df[y], alpha=0.1, label='data')
+
+    # Add placeholders for legend
+    scatter_points([], [], 'indigo', 'v', "minimum" if b_show_min else None)
+    scatter_points([], [], 'purple', 'x', "25% percentile" if b_show_25 else None)
+    scatter_points([], [], 'b', 'o', "50% percentile (Median)")
+    scatter_points([], [], 'red', '*', "Mean")
+    scatter_points([], [], 'teal', '+', "75% percentile" if b_show_75 else None)
+    scatter_points([], [], 'green', '^', "maximum" if b_show_max else None)
+
+    y_median, y_mean, x_pts = [], [], []
+    i_min = int(df[x].min() // xbinsize)
+    i_max = int(df[x].max() // xbinsize) + 1
+
+    for i in range(i_min, i_max):
+        frac_rev = df.loc[df[f'{x}_class'] == i][y]
+        if not frac_rev.empty:
+            x_val = (i + 0.5) * xbinsize
+            x_pts.append(x_val)
+            y_median_val = frac_rev.quantile(0.5)
+            y_mean_val = frac_rev.mean()
+            y_median.append(y_median_val)
+            y_mean.append(y_mean_val)
+
+            if b_show_min:
+                scatter_points([x_val], [frac_rev.min()], 'indigo', 'v')
+            if b_show_25:
+                scatter_points([x_val], [frac_rev.quantile(0.25)], 'purple', 'x')
+            scatter_points([x_val], [y_median_val], 'b', 'o')
+            scatter_points([x_val], [y_mean_val], 'red', '*')
+            if b_show_75:
+                scatter_points([x_val], [frac_rev.quantile(0.75)], 'teal', '+')
+            if b_show_max:
+                scatter_points([x_val], [frac_rev.max()], 'green', '^')
+
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.ylim(y_range[0], y_range[1])
+
+    x_pts = np.array(x_pts).reshape(-1, 1)
+    y_median = np.array(y_median)
+    y_mean = np.array(y_mean)
+
+    def fit_and_plot_polynomial(x_data, y_data, degree, label, color):
+        """ Helper function to fit polynomial and plot. """
+        model = Pipeline([('poly', PolynomialFeatures(degree=degree)),
+                          ('linear', LinearRegression(fit_intercept=False))])
+        model.fit(x_data, y_data)
+        y_pred = model.predict(x_data)
+        coeffs = model.named_steps['linear'].coef_
+        rmse = np.sqrt(mean_squared_error(y_data, y_pred))
+        plt.plot(x_data, y_pred, label=label, color=color, alpha=0.8)
+        return coeffs, rmse, y_pred
+
+    mean_coeffs, mean_rmse, model_pred_mean = None, None, None
+    median_coeffs, median_rmse, model_pred_median = None, None, None
+
+    if b_show_lr_fit_median:
+        lr = LinearRegression()
+        lr.fit(x_pts, y_median)
+        plt.plot(x_pts, lr.predict(x_pts), label='Linear Fit on Median', color='orange', alpha=0.8)
+
+    if b_show_pol_fit_mean:
+        mean_coeffs, mean_rmse, model_pred_mean = fit_and_plot_polynomial(x_pts, y_mean, pol_degree, 
+                                                                          f'Pol{pol_degree} Fit on Mean', 'yellow')
+        print("Mean coefficients:", np.round(mean_coeffs, 6))
+        print(f'Mean RMSE: {round(mean_rmse, 3)}')
+
+    if b_show_pol_fit_median:
+        median_coeffs, median_rmse, model_pred_median = fit_and_plot_polynomial(x_pts, y_median, pol_degree, 
+                                                                                f'Pol{pol_degree} Fit on Median', 'cyan')
+        print("Median coefficients:", np.round(median_coeffs, 6))
+        print(f'Median RMSE: {round(median_rmse, 3)}')
+
+    plt.legend(loc='upper left')
+
+    if b_save:
+        plt.savefig(savefig_name, dpi=300)
+
+    return x_pts.flatten(), model_pred_mean, model_pred_median, mean_rmse, median_rmse, mean_coeffs, median_coeffs
+
     
 def print_col_uniques(df:pd.DataFrame, 
                       b_print_col_unique = False, 
