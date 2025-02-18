@@ -212,7 +212,7 @@ def create_lagged_dataset(
     
     return X, y, dates
 
-### b. Create Time Series for Predictino using he last datapoint
+### b. Create Time Series for Prediction using the last datapoint
 def create_prediction_lagged_dataset(
     shifted_df: pd.DataFrame,
     feature_cols: List[str],

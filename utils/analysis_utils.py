@@ -211,7 +211,7 @@ def create_df_from_gcs_file(blob_name:str,
                             excel_sheet_num = 0,
                             excel_skiprows_num = 0,
                             excel_header_nums = 0,
-                            b_stand_cols = True,                            
+                            b_stand_cols = True,             
                             project_number:str,
                             bucket_name:str, 
                             ) -> pd.DataFrame:
@@ -653,32 +653,196 @@ def draw_histplots(df:pd.DataFrame,
         fig.savefig(savefig_fullname,dpi = savefig_dpi)
 
 
-def load_bq_table_from_df(df:pd.DataFrame,
-                          ds_table_name:str,
-                          project_name:str,
-                         ) -> None:
+def median_absolute_percentage_error(
+    y_true: Union[Sequence[float], np.ndarray],
+    y_pred: Union[Sequence[float], np.ndarray]
+) -> float:
     """
-    Context: Alternative to upload pandas df save as csv and upload it to gcs bucket
-    Reference: https://stackoverflow.com/questions/63200201/create-a-bigquery-table-from-pandas-dataframe-without-specifying-schema-explici
+    Calculate the median absolute percentage error (MedAPE).
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        Actual target values. Can be a list, tuple, or NumPy array of floats.
+
+    y_pred : array-like of shape (n_samples,)
+        Predicted target values. Must have the same length as `y_true`.
+
+    Returns
+    -------
+    medape : float
+        The median absolute percentage error as a float value.
+
+    Notes
+    -----
+    - The MedAPE is calculated as the median of the absolute percentage errors between
+      the actual and predicted values.
+    - This metric is useful for assessing the predictive accuracy of regression models,
+      especially when the data contains outliers or is skewed.
+
+    Examples
+    --------
+    >>> y_true = [100, 200, 300, 400, 500]
+    >>> y_pred = [110, 190, 310, 420, 480]
+    >>> median_absolute_percentage_error(y_true, y_pred)
+    0.05
+    """
+    y_true = np.array(y_true, dtype=np.float64)
+    y_pred = np.array(y_pred, dtype=np.float64)
     
-    Args: 
-        1. df: Pandas dataframe to save
-        2. ds_table_name: Dataset and Table Name in format "{dataset}.{table_name}"
-        3. project_name: Project Name
-          
-    Return: None, Load/Create bq table
+    # Avoid division by zero
+    epsilon = np.finfo(np.float64).eps
+    y_true_safe = np.where(y_true == 0, epsilon, y_true)
+    
+    # Calculate absolute percentage errors
+    ape = np.abs((y_true - y_pred) / y_true_safe)
+    
+    # Compute median of absolute percentage errors
+    medape = np.median(ape)
+    
+    return medape        
+
+
+def normalize_features(X_train: pd.DataFrame, 
+                       X_test: pd.DataFrame, 
+                       cols_to_normalize: List[str],
+                       b_drop_norm_cols: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame, StandardScaler]:
+    """
+    Normalize the specified features in the given DataFrames using standard scaling. This method scales the features 
+    of the input DataFrames to have zero mean and unit variance. 
+
+    Arguments:
+    - X_train (pd.DataFrame): The training DataFrame containing features to be normalized.
+    - X_test (pd.DataFrame): The test DataFrame containing features to be normalized.
+    - cols_to_normalize (List[str]): List of column names to be normalized.
+    - b_drop_norm_cols (bool): Option to drop the original column used to normalize in the final returning dataframe
+
+    Returns:
+    - tuple: A tuple containing three elements:
+        1. pd.DataFrame: The training DataFrame with the normalized features.
+        2. pd.DataFrame: The test DataFrame with the normalized features.
+        3. StandardScaler: The scaler object used for normalization, which can be used later to apply the same scaling to other data sets (e.g., during model evaluation).
     """
     
-    # Load client
-    client = bigquery.Client(project= project_name)
+    scaler = StandardScaler()
+    X_train_norm_subset = scaler.fit_transform(X_train[cols_to_normalize])
+    X_test_norm_subset = scaler.transform(X_test[cols_to_normalize])
+    
+    # Create copies of the original DataFrames to avoid modifying them directly
+    X_train_normalized = X_train.copy()
+    X_test_normalized = X_test.copy()
+    
+    # Add normalized columns to the DataFrames
+    norm_col_names = []
+    for i, col in enumerate(cols_to_normalize):
+        norm_col_name = f"{col}_norm"
+        X_train_normalized[norm_col_name] = X_train_norm_subset[:, i]
+        X_test_normalized[norm_col_name] = X_test_norm_subset[:, i]
+        norm_col_names.append(norm_col_name)
+    
+    # Drop the original columns if specified
+    if b_drop_norm_cols:
+        X_train_normalized.drop(columns=cols_to_normalize, inplace=True)
+        X_test_normalized.drop(columns=cols_to_normalize, inplace=True)
+    
+    # Reorder columns: normalized columns first, then the rest
+    non_norm_cols_train = [col for col in X_train_normalized.columns if col not in norm_col_names]
+    ordered_columns_train = norm_col_names + non_norm_cols_train
+    X_train_normalized = X_train_normalized[ordered_columns_train]
+    
+    non_norm_cols_test = [col for col in X_test_normalized.columns if col not in norm_col_names]
+    ordered_columns_test = norm_col_names + non_norm_cols_test
+    X_test_normalized = X_test_normalized[ordered_columns_test]
+    
+    return X_train_normalized, X_test_normalized, scaler    
 
-    # Define table name, in format dataset.table_name
-    table = ds_table_name
 
-    # Load data to BQ
-    job = client.load_table_from_dataframe(df, table)        
+def plot_display_pol_fit(df, x_cols, y_col, degree=1, x_col_lr_plot=None):
+    """
+    Perform linear or polynomial regression and plot the results.
+
+    Args:
+        df (pd.DataFrame): The input data frame containing the predictors and response variable.
+        x_cols (list of str): List of column names to be used as predictors.
+        y_col (str): The column name of the response variable.
+        degree (int, optional): The degree of the polynomial for regression. Default is 1 (linear regression).
+        x_col_lr_plot (str, optional): The column name to be used for plotting in the multivariate case. Default is None.
+
+    Returns:
+        None. Displays a plot of the regression results and prints the model parameters and evaluation metrics.
+    """    
+    
+    # Define the response (y)
+    y = df[y_col].values  # Response variable
+
+    # Define the predictors (X)
+    if len(x_cols) == 1:
+        X = df[x_cols[0]].values.reshape(-1, 1)  # Reshape to ensure it's a 2D array
+    else:
+        X = df[x_cols].values  # Predictors
+
+    # Create and fit the model
+    if degree == 0:
+        model = LinearRegression(fit_intercept=True)
+        X = np.ones_like(X)  # Use a single column of ones
+        model.fit(X, y)
+        coefficients = []
+        intercept = model.intercept_
+    else:
+        model = Pipeline([
+            ('poly', PolynomialFeatures(degree=degree)),
+            ('linear', LinearRegression(fit_intercept=True))
+        ])
+        model.fit(X, y)
+        linear_model = model.named_steps['linear']
+        coefficients = linear_model.coef_
+        intercept = linear_model.intercept_
+
+    # Predict the response
+    y_pred = model.predict(X)
+
+    # Calculate R-squared and RMSE
+    r_squared = model.score(X, y)
+    rmse = np.sqrt(mean_squared_error(y, y_pred))
+
+    # Plotting the original data and the regression line
+    plt.figure(figsize=(10, 6))
+    
+    if len(x_cols) == 1:
+        # Univariate case
+        sns.scatterplot(x=df[x_cols[0]], y=df[y_col])
+        sorted_indices = np.argsort(df[x_cols[0]])
+        plt.plot(df[x_cols[0]].iloc[sorted_indices], y_pred[sorted_indices], color='red', label=f'{degree}-degree Polynomial fit')
+        plt.xlabel(x_cols[0])
+    else:
+        # Multivariate case: plot only against the specified predictor
+        if x_col_lr_plot is None:
+            x_col_lr_plot = x_cols[0]
+        sns.scatterplot(x=df[x_col_lr_plot], y=df[y_col])
+        plt.plot(df[x_col_lr_plot], y_pred, color='red', label='Regression line')
+        plt.xlabel(x_col_lr_plot)
         
+    plt.ylabel(y_col)
+    plt.title('Linear Regression Analysis')
+    plt.legend()
+    plt.show()        
+        
+    # Print the results
+    print(f"# of Data Samples: {df.shape[0]}")
+    print(f"Intercept: {intercept}")
+    if degree == 0:
+        print("Model is a constant fit with intercept only.")
+    else:
+        if degree == 1 or len(x_cols) > 1:
+            for i, col in enumerate(x_cols):
+                print(f"Slope for {col}: {coefficients[i+1]}")
+        else:
+            for i in range(degree + 1):
+                print(f"Coefficient for degree {i}: {coefficients[i]}")
+    print(f"R-squared: {r_squared}")
+    print(f"RMSE: {round(rmse, 3)}")
     
+
 def print_col_uniques(df:pd.DataFrame, 
                       b_print_col_unique = False, 
                       n_unique_min = 0, 
@@ -743,9 +907,81 @@ def print_cor_val(df:pd.DataFrame,
               )
         # if the threshold values are within the correct range
         if np.abs(cor_val)>cor_thr_min and np.abs(cor_val)<cor_thr_max:
-            print(f'cor{c}', np.round(cor_val,3), ', p-val:', np.round(cor_val_p_val,6))    
-            
+            print(f'cor{c}', np.round(cor_val,3), ', p-val:', np.round(cor_val_p_val,6))
+
+
+def print_reg_metrics(
+    y_meas: Union[Sequence[float], np.ndarray],
+    y_pred: Union[Sequence[float], np.ndarray],
+    b_scaled: bool = True
+) -> None:
+    """
+    Calculate and print regression metrics for model evaluation.
+
+    Parameters
+    ----------
+    y_meas : array-like of shape (n_samples,)
+        Actual target values. Can be a list, tuple, or NumPy array of floats.
+
+    y_pred : array-like of shape (n_samples,)
+        Predicted target values. Must have the same length as `y_meas`.
+
+    b_scaled : bool, optional (default=True)
+        Indicates whether the data has been scaled. If `b_scaled` is False,
+        the function will also compute percentage-based metrics such as MAPE
+        and MedAPE.
+
+    Returns
+    -------
+    None
+        This function prints the regression metrics and does not return any value.
+
+    Notes
+    -----
+    - The function computes and prints the following regression metrics:
+        - Root Mean Squared Error (RMSE)
+        - Explained Variance Score
+        - R-squared (R²)
+    - If `b_scaled` is False, it additionally computes:
+        - Mean Absolute Percentage Error (MAPE)
+        - Median Absolute Percentage Error (MedAPE)
+    - The MAPE and MedAPE are multiplied by 100 to express them as percentages.
+    - The function assumes that the inputs are numeric and does not perform
+      input validation.
+
+    Examples
+    --------
+    >>> y_true = [3.0, -0.5, 2.0, 7.0]
+    >>> y_pred = [2.5, 0.0, 2.0, 8.0]
+    >>> print_reg_metrics(y_true, y_pred, b_scaled=False)
+    Root Mean Squared Error (RMSE): 0.612
+    Explained Variance Score: 0.957
+    R-squared: 0.948
+    Mean Absolute Percentage Error (MAPE)*: 12.5%
+    Median Absolute Percentage Error (MedAPE)*: 10.0%
+    """
+    mse = mean_squared_error(y_meas, y_pred)
+    rmse = np.sqrt(mse)
+    explained_score = explained_variance_score(y_meas, y_pred)
+    r2 = r2_score(y_meas, y_pred)
+    # percentage error
+    pe = compute_percentage_errors(y_meas, y_pred)
     
+    print(f"Root Mean Squared Error (RMSE): {round(rmse, 3)}")
+    print(f"Explained Variance Score: {round(explained_score, 3)}")
+    print(f"R-squared: {round(r2, 3)}")
+    
+    if not b_scaled:
+        mape = mean_absolute_percentage_error(y_meas, y_pred)
+        print(f"Mean Absolute Percentage Error (MAPE)*: {round(mape * 100, 1)}%")
+        medape = median_absolute_percentage_error(y_meas, y_pred)
+        print(f"Median Absolute Percentage Error (MedAPE)*: {round(medape * 100, 1)}%")
+        mpe = pe.mean()
+        print(f"Mean Percentage Error (MPE)*: {round(mpe, 1)}%")        
+        medpe = np.median(pe)
+        print(f"Median Percentage Error (MedPE)*: {round(medpe, 1)}%")
+
+
 def standardize_columns(df:pd.DataFrame) -> None:
     """
     Input: Pandas dataframe
@@ -771,6 +1007,7 @@ def standardize_columns(df:pd.DataFrame) -> None:
     df.columns = df.columns.str.replace('/', '_', regex=True)    
     df.columns = df.columns.str.replace('#', 'num', regex=True)
     df.columns = df.columns.str.replace('1st', 'first', regex=True) # patsy doesn't like start with number
+
     
 def standardize_column_values(df:pd.DataFrame,
                               st_cols:List[str]) -> None:
@@ -811,3 +1048,73 @@ def upload_file_to_gcs(local_filename:str,
     bucket = client.get_bucket(bucket_name)
     blob = bucket.blob(blob_name)  # This defines the path where the file will be stored in the bucket
     blob.upload_from_filename(filename = local_filename)    
+
+
+def upload_df_to_bq(
+    df: pd.DataFrame,
+    project_id: str,
+    dataset_id: str,
+    table_id: str,
+    schema: Optional[List[bigquery.SchemaField]] = None,
+    credentials_path: Optional[str] = None
+) -> None:
+    """
+    Upload a DataFrame to BigQuery with specific configuration.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing state-level clusters
+    project_id : str
+        GCP project ID
+    dataset_id : str
+        BigQuery dataset ID
+    table_id : str
+        BigQuery table ID
+    schema : Optional[List[bigquery.SchemaField]]
+        List of BigQuery SchemaField objects defining the table schema.
+        If None, schema will be inferred from DataFrame.
+    credentials_path : Optional[str]
+        Path to service account credentials JSON file
+    """
+    # Initialize BigQuery client
+    if credentials_path:
+        credentials = service_account.Credentials.from_service_account_file(credentials_path)
+        client = bigquery.Client(project=project_id, credentials=credentials)
+    else:
+        client = bigquery.Client(project=project_id)
+
+    # Full table reference
+    table_ref = f"{project_id}.{dataset_id}.{table_id}"
+    
+    # Configure the load job
+    job_config = bigquery.LoadJobConfig(
+        schema=schema,  # Will be None if not provided, letting BQ infer schema
+        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
+    )
+    
+    try:
+        # Load the data
+        job = client.load_table_from_dataframe(
+            df, 
+            table_ref,
+            job_config=job_config
+        )
+        job.result()  # Wait for the job to complete
+        
+        # Get table info and print results
+        table = client.get_table(table_ref)
+        print(f"Loaded {table.num_rows} rows into {table_ref}")
+        
+        # Print schema if it was inferred
+        if schema is None:
+            print("\nInferred schema:")
+            for field in table.schema:
+                print(f"{field.name}: {field.field_type}")
+        
+    except Exception as e:
+        print(f"Error uploading to BigQuery: {str(e)}")
+        print(f"DataFrame dtypes:\n{df.dtypes}")
+        raise
+    finally:
+        client.close()        
