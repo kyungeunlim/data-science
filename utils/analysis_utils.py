@@ -11,43 +11,108 @@ import time
 from io import BytesIO
 from functools import reduce
 from itertools import combinations
-from typing import List, Union
-
-# Third-party imports for analysis
+from typing import List, Tuple, Optional, Dict, Any, Union, Sequence
+# Third-party imports for data analysis and visualization
 import numpy as np
 import pandas as pd
 import scipy
-
-# import pymc3 as pm  # Uncomment if needed
-
-# sklearn
-from sklearn.linear_model import LinearRegression
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import PolynomialFeatures
-
-# Visualization imports
 import matplotlib.pyplot as plt
 import seaborn as sns
-
-# Google Cloud Platform (GCP) imports
+# Machine learning imports from scikit-learn
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (
+    mean_squared_error,
+    mean_absolute_percentage_error,
+    explained_variance_score,
+    r2_score
+)
+# Google Cloud Platform (GCP) service imports
 from google.cloud import bigquery, storage
-import google.cloud
 
-def check_data(df:pd.DataFrame) -> None:
+def check_data(df: pd.DataFrame, unique_id: Union[str, List[str]], verbose: bool = True) -> dict:
     """
-    Input: Pandas dataframe
+    Check and summarize the data in a pandas DataFrame.
     
-    Return: None, prints details including data type, missing values, and number of unique values
+    Args:
+        df (pd.DataFrame): The DataFrame to check.
+        unique_id (Union[str, List[str]]): The column name(s) to use as a unique identifier.
+        verbose (bool): Whether to print the results (default: True).
+    
+    Returns:
+        dict: A dictionary containing the summary information.
     """
-    print('-------- 1. Datatypes --------')
-    print(df.dtypes)
-    print('\n')
-    print('-------- 2. Missing Values --------')
-    print(create_missing_values_table(df))
-    print('\n')
-    print('-------- 3. Unique Values --------')
-    print(print_col_uniques(df))
-    print('\n')
+    summary = {
+        'datatypes': df.dtypes,
+        'missing_values': create_missing_values_table(df),
+        'unique_values': print_col_uniques(df, return_dict=True),
+        'duplicates': create_duplicated_df(df, unique_id)
+    }
+    
+    if verbose:
+        print('-------- 1. Datatypes --------')
+        print(summary['datatypes'])
+        print('\n-------- 2. Missing Values --------')
+        print(summary['missing_values'])
+        print('\n-------- 3. Unique Values --------')
+        for col, count in summary['unique_values'].items():
+            print(f"{col}: {count}")
+        print('\n-------- 4. Checking Duplicates --------')
+        if summary['duplicates'].shape[0] > 0:
+            print(f"There are {summary['duplicates'].shape[0]} duplicates found with {unique_id if isinstance(unique_id, str) else ', '.join(unique_id)}. Check the raw data!!")
+        else:
+            print(f"No duplicates found with {unique_id if isinstance(unique_id, str) else ', '.join(unique_id)}")
+    
+    return summary
+
+
+def compute_absolute_percentage_errors(y_true: Union[np.ndarray, Sequence[float]], y_pred: Union[np.ndarray, Sequence[float]]) -> np.ndarray:
+    """
+    Calculate absolute percentage errors between true and predicted values.
+
+    Parameters
+    ----------
+    y_true : Union[np.ndarray, Sequence[float]]
+        The true values.
+    y_pred : Union[np.ndarray, Sequence[float]]
+        The predicted values.
+
+    Returns
+    -------
+    np.ndarray
+        An array of absolute percentage errors.
+    """
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    epsilon = np.finfo(np.float64).eps
+    y_true_safe = np.where(y_true == 0, epsilon, y_true)
+    ape = np.abs((y_true - y_pred) / y_true_safe) * 100
+    return ape
+
+
+def compute_percentage_errors(y_true: Union[np.ndarray, Sequence[float]], y_pred: Union[np.ndarray, Sequence[float]]) -> np.ndarray:
+    """
+    Calculate percentage errors between true and predicted values.
+
+    Parameters
+    ----------
+    y_true : Union[np.ndarray, Sequence[float]]
+        The true values.
+    y_pred : Union[np.ndarray, Sequence[float]]
+        The predicted values.
+
+    Returns
+    -------
+    np.ndarray
+        An array of percentage errors.
+    """
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    epsilon = np.finfo(np.float64).eps
+    y_true_safe = np.where(y_true == 0, epsilon, y_true)
+    pe = ((y_pred - y_true) / y_true_safe) * 100
+    return pe
 
 
 def convert_to_datetime_type(df:pd.DataFrame, time_cols:List[str]) -> None:
@@ -66,7 +131,7 @@ def convert_to_datetime_type(df:pd.DataFrame, time_cols:List[str]) -> None:
             
     print(f" --- Convert the data type from object to datetime for {time_cols}")
     print('\n')
-       
+
     
 def create_bucket_by_thr_col(df: pd.DataFrame, 
                              thr_col: str, 
@@ -218,15 +283,16 @@ def create_duplicated_df(df:pd.DataFrame,
     return df_duplicates
 
 
-def create_gb_aggs_df(df:pd.DataFrame,
-                      gb_cols:List[str],
-                      count_cols = None,
-                      nunique_cols = None,
-                      mean_cols = None,
-                      mean_std_cols = None,
-                      min_max_cols = None,
-                      sum_cols = None,
-                      merge_how = 'outer') -> pd.DataFrame:
+def create_gb_aggs_df(df: pd.DataFrame,
+                      gb_cols: list[str],
+                      count_cols=None,
+                      nunique_cols=None,
+                      mean_cols=None,
+                      mean_std_cols=None,
+                      min_max_cols=None,
+                      sum_cols=None,
+                      mod_cols=None,
+                      merge_how='outer') -> pd.DataFrame:
     """
     Context: Sometimes we want to perform different aggregation for different columns and see them together.
     
@@ -235,14 +301,14 @@ def create_gb_aggs_df(df:pd.DataFrame,
         2. gb_cols: Columns used for group by/aggregation
         3. count_cols: Columns used to obtain count 
         4. nunique_cols: Columns we're interested in knowing nunique
-        5. mean_cols: Columns we're intrested in knowing average (sometimes having std is too crowded)
+        5. mean_cols: Columns we're interested in knowing average (sometimes having std is too crowded)
         6. mean_std_cols: Columns we're interested in knowing average/mean and std
         7. min_max: Columns we're interested in knowing min and max
         8. sum_cols: Columns we're interested in knowing sum
+        9. mod_cols: Columns we're interested in knowing mode (most frequent value)
         
     Return: Pandas dataframe all the above merged
     """
-    
     dfs = []
     agg_str = []
     if count_cols:
@@ -256,17 +322,17 @@ def create_gb_aggs_df(df:pd.DataFrame,
         agg_str.append('nunique')
         
     if mean_cols:
-        df_gb_nunique = create_gb_df(df, gb_cols, mean_cols, ['mean'])
-        dfs.append(df_gb_nunique)
+        df_gb_mean = create_gb_df(df, gb_cols, mean_cols, ['mean'])
+        dfs.append(df_gb_mean)
         agg_str.append('mean')        
         
     if mean_std_cols:
-        df_gb_mean_std = create_gb_df(df, gb_cols, mean_std_cols, ['mean','std'])
+        df_gb_mean_std = create_gb_df(df, gb_cols, mean_std_cols, ['mean', 'std'])
         dfs.append(df_gb_mean_std)
         agg_str.append('mean-std')
         
     if min_max_cols:
-        df_gb_min_max = create_gb_df(df, gb_cols, min_max_cols, ['min','max'])
+        df_gb_min_max = create_gb_df(df, gb_cols, min_max_cols, ['min', 'max'])
         dfs.append(df_gb_min_max)
         agg_str.append('min-max')
         
@@ -275,53 +341,67 @@ def create_gb_aggs_df(df:pd.DataFrame,
         dfs.append(df_gb_sum)
         agg_str.append('sum')
         
+    if mod_cols:
+        df_gb_mod = create_gb_df(df, gb_cols, mod_cols, ['mod'])
+        df_gb_mod.columns = [col.replace('<lambda>', 'mod') for col in df_gb_mod.columns]
+        dfs.append(df_gb_mod)
+        agg_str.append('mod')
+        
     df_merged = create_merged_df(dfs, gb_cols, merge_how)
     print(f"{agg_str} were performed, and hence {len(dfs)} dfs were merged.")
     
     return df_merged
 
 
-def create_gb_df(df:pd.DataFrame, 
-                 groupby_cols:List[str], 
-                 feature_cols:List[str], 
-                 agg_cols = ['count','mean','median','sum'], 
-                 dropna_opt = True) -> pd.DataFrame:
+def create_gb_df(df: pd.DataFrame, 
+                 groupby_cols: list[str], 
+                 feature_cols: list[str], 
+                 agg_cols=['count', 'mean', 'median', 'sum', 'mod'], 
+                 dropna_opt=True) -> pd.DataFrame:
     """
     Args:
         1. df: Pandas dataframe
         2. groupby_cols: Columns to use for group by/aggregation
         3. feature_cols: Columns to have summary stat with aggregation, 
-            Note that f should be numeric to be able to compute summary stat
-        4. agg_cols: Aggregation/summary stat types = ['count', 'mean', 'std', 'median', 'sum', 'unique','nunique'] etc
+            Note that feature_cols should be numeric to be able to compute summary stats
+        4. agg_cols: Aggregation/summary stat types = ['count', 'mean', 'std', 'median', 'sum', 'unique', 'nunique', 'mod'] etc
         5. dropna_opt: we do not include null vals by default
-        
+
     Return: Pandas dataframe
     """
+    # Custom aggregation to handle 'mod'
+    agg_dict = {}
+    for col in feature_cols:
+        agg_dict[col] = [agg for agg in agg_cols if agg != 'mod']
+        if 'mod' in agg_cols:
+            agg_dict[col].append(lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan)
 
-    df_groupby = df.groupby(groupby_cols, as_index = False, dropna = dropna_opt)[feature_cols].agg(agg_cols)
+    df_groupby = df.groupby(groupby_cols, as_index=False, dropna=dropna_opt).agg(agg_dict)
     df_show = df_groupby
-    df_show.columns = [f'{col[0]}_{col[1]}' for col in df_show.columns]
+    
+    # Rename columns
+    #df_show.columns = [f'{col[0]}_{col[1]}' if isinstance(col, tuple) and col[1] != '<lambda_0>' else f'{col[0]}_mod' if isinstance(col, tuple) else col for col in df_show.columns]
+    
+    # Rename columns
+    df_show.columns = [f'{col[0]}' if col[1] == '' else f'{col[0]}_{col[1]}' if col[1] != '<lambda_0>' else f'{col[0]}_mod' for col in df_show.columns]
 
-    df_return = df_show.reset_index()
+    df_return = df_show.reset_index(drop=True)
 
-    # Add precentage when we want to see the counts or nuniques
+    # Add percentage when we want to see the counts or nuniques
     if (agg_cols == ['count'] or agg_cols == ['nunique'] or agg_cols == ['mean']) and len(feature_cols) == 1:
         # compute percentages for "count" or "nunique"
         # 1. count percentage
         if agg_cols == ['count']:
-            print(f'{feature_cols[0]}_{agg_cols[0]}')
-            df_return['perc [%]'] = np.round(df_return[f'{feature_cols[0]}_{agg_cols[0]}']/
-                                             df_return[f'{feature_cols[0]}_count'].sum()*100,2)
+            df_return['perc [%]'] = np.round(df_return[f'{feature_cols[0]}_{agg_cols[0]}'] /
+                                             df_return[f'{feature_cols[0]}_count'].sum() * 100, 2)
         # 2. unique percentage
-        ## note that denominator is number of unique users, not the simple sum
-        elif agg_cols ==['nunique']:
-            print(f'{feature_cols[0]}_{agg_cols[0]}')
-            df_return['perc [%]'] = np.round(df_return[f'{feature_cols[0]}_nunique']/
-                                     df_return[f'{feature_cols[0]}_nunique'].sum()*100,2)
-#                                     df[feature_cols[0]].nunique()*100,2)
+        # note that denominator is number of unique users, not the simple sum
+        elif agg_cols == ['nunique']:
+            df_return['perc [%]'] = np.round(df_return[f'{feature_cols[0]}_nunique'] /
+                                             df_return[f'{feature_cols[0]}_nunique'].sum() * 100, 2)
 
         # return the results ordered by feature col
-        df_return = df_return.sort_values(by=f'{feature_cols[0]}_{agg_cols[0]}', ascending = False)
+        df_return = df_return.sort_values(by=f'{feature_cols[0]}_{agg_cols[0]}', ascending=False)
 
     return df_return
 
