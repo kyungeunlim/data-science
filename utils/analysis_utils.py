@@ -11,52 +11,108 @@ import time
 from io import BytesIO
 from functools import reduce
 from itertools import combinations
-from typing import List, Union
-
-# Third-party imports for analysis
+from typing import List, Tuple, Optional, Dict, Any, Union, Sequence
+# Third-party imports for data analysis and visualization
 import numpy as np
 import pandas as pd
 import scipy
-
-# import pymc3 as pm  # Uncomment if needed
-
-# sklearn
-from sklearn.linear_model import LinearRegression
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import PolynomialFeatures, StandardScaler
-from sklearn.metrics import mean_squared_error
-
-# Visualization imports
 import matplotlib.pyplot as plt
 import seaborn as sns
-
-# Google Cloud Platform (GCP) imports
+# Machine learning imports from scikit-learn
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import (
+    mean_squared_error,
+    mean_absolute_percentage_error,
+    explained_variance_score,
+    r2_score
+)
+# Google Cloud Platform (GCP) service imports
 from google.cloud import bigquery, storage
-import google.cloud
+
+def check_data(df: pd.DataFrame, unique_id: Union[str, List[str]], verbose: bool = True) -> dict:
+    """
+    Check and summarize the data in a pandas DataFrame.
+    
+    Args:
+        df (pd.DataFrame): The DataFrame to check.
+        unique_id (Union[str, List[str]]): The column name(s) to use as a unique identifier.
+        verbose (bool): Whether to print the results (default: True).
+    
+    Returns:
+        dict: A dictionary containing the summary information.
+    """
+    summary = {
+        'datatypes': df.dtypes,
+        'missing_values': create_missing_values_table(df),
+        'unique_values': print_col_uniques(df, return_dict=True),
+        'duplicates': create_duplicated_df(df, unique_id)
+    }
+    
+    if verbose:
+        print('-------- 1. Datatypes --------')
+        print(summary['datatypes'])
+        print('\n-------- 2. Missing Values --------')
+        print(summary['missing_values'])
+        print('\n-------- 3. Unique Values --------')
+        for col, count in summary['unique_values'].items():
+            print(f"{col}: {count}")
+        print('\n-------- 4. Checking Duplicates --------')
+        if summary['duplicates'].shape[0] > 0:
+            print(f"There are {summary['duplicates'].shape[0]} duplicates found with {unique_id if isinstance(unique_id, str) else ', '.join(unique_id)}. Check the raw data!!")
+        else:
+            print(f"No duplicates found with {unique_id if isinstance(unique_id, str) else ', '.join(unique_id)}")
+    
+    return summary
 
 
-def check_data(df:pd.DataFrame, unique_id:str) -> None:
+def compute_absolute_percentage_errors(y_true: Union[np.ndarray, Sequence[float]], y_pred: Union[np.ndarray, Sequence[float]]) -> np.ndarray:
     """
-    Input: Pandas dataframe
-    
-    Return: None, prints details including data type, missing values, and number of unique values
+    Calculate absolute percentage errors between true and predicted values.
+
+    Parameters
+    ----------
+    y_true : Union[np.ndarray, Sequence[float]]
+        The true values.
+    y_pred : Union[np.ndarray, Sequence[float]]
+        The predicted values.
+
+    Returns
+    -------
+    np.ndarray
+        An array of absolute percentage errors.
     """
-    print('-------- 1. Datatypes --------')
-    print(df.dtypes)
-    print('\n')
-    print('-------- 2. Missing Values --------')
-    print(create_missing_values_table(df))
-    print('\n')
-    print('-------- 3. Unique Values --------')
-    print(print_col_uniques(df))
-    print('\n')
-    print('-------- 4. Checking Duplicates --------')
-    df_dup = create_duplicated_df(df, unique_id)
-    
-    if df_dup.shape[0] > 0 :
-        print(f"There are {df_dup.shape[0]} duplicates found with {unique_id}. Check the raw data!!")
-    else:
-        print(f"No duplicates found with {unique_id}")
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    epsilon = np.finfo(np.float64).eps
+    y_true_safe = np.where(y_true == 0, epsilon, y_true)
+    ape = np.abs((y_true - y_pred) / y_true_safe) * 100
+    return ape
+
+
+def compute_percentage_errors(y_true: Union[np.ndarray, Sequence[float]], y_pred: Union[np.ndarray, Sequence[float]]) -> np.ndarray:
+    """
+    Calculate percentage errors between true and predicted values.
+
+    Parameters
+    ----------
+    y_true : Union[np.ndarray, Sequence[float]]
+        The true values.
+    y_pred : Union[np.ndarray, Sequence[float]]
+        The predicted values.
+
+    Returns
+    -------
+    np.ndarray
+        An array of percentage errors.
+    """
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    epsilon = np.finfo(np.float64).eps
+    y_true_safe = np.where(y_true == 0, epsilon, y_true)
+    pe = ((y_pred - y_true) / y_true_safe) * 100
+    return pe
 
 
 def convert_to_datetime_type(df:pd.DataFrame, time_cols:List[str]) -> None:
@@ -75,7 +131,7 @@ def convert_to_datetime_type(df:pd.DataFrame, time_cols:List[str]) -> None:
             
     print(f" --- Convert the data type from object to datetime for {time_cols}")
     print('\n')
-       
+
     
 def create_bucket_by_thr_col(df: pd.DataFrame, 
                              thr_col: str, 
@@ -155,7 +211,7 @@ def create_df_from_gcs_file(blob_name:str,
                             excel_sheet_num = 0,
                             excel_skiprows_num = 0,
                             excel_header_nums = 0,
-                            b_stand_cols = True,                            
+                            b_stand_cols = True,             
                             project_number:str,
                             bucket_name:str, 
                             ) -> pd.DataFrame:
@@ -216,54 +272,27 @@ def create_duplicated_df(df:pd.DataFrame,
     Return: Pandas dataframe
     """
     
-    df_duplicated_arr = df[df.duplicated(col)][col].unique()
+    df_duplicated_arr = df[df.duplicated(col) == True][col].unique()
     print(f"Total number of duplicated {col} is {len(df_duplicated_arr)}")
     
     if b_show:
         print(df_duplicated_arr)
 
-    df_duplicates = df[df[col].isin(df_duplicated_arr)].sort_values(by = col)
+    df_duplicates = df[df[col].isin(df_duplicated_arr)==True].sort_values(by = col)
 
     return df_duplicates
 
-def create_duplicated_dropped_df(df: pd.DataFrame, unique_id: str, keep_record_option: str = "first") -> pd.DataFrame:
-    """
-    Processes a DataFrame to remove duplicates based on a specified column, allowing the option to keep either the
-    first, last, or no duplicate entries.
 
-    Args:
-    - df (pd.DataFrame): The DataFrame from which duplicates need to be removed.
-    - unique_id (str): The name of the column based on which duplicates will be identified.
-    - keep_record_option (str, optional): Specifies which duplicate record to keep. 
-      Can be 'first', 'last', or False (to drop all duplicates). Defaults to 'first'.
-
-    Returns:
-    - pd.DataFrame: A new DataFrame with duplicates removed as per the specified options.
-    
-    """
-    # Identify all duplicated entries based on the unique_id
-    df_dup = create_duplicated_df(df, unique_id)
-    
-    # Filter out all entries that are not duplicated
-    df_nodup = df.loc[df[unique_id].isin(df_dup[unique_id].unique()) == False]
-    
-    # From the duplicated entries, drop duplicates as per the keep_record_option
-    df_dup_fix = df_dup.drop_duplicates(subset=[unique_id], keep=keep_record_option)
-    
-    # Concatenate the non-duplicated entries and the fixed duplicates
-    df_clean = pd.concat([df_nodup, df_dup_fix], axis=0)
-    
-    return df_clean
-
-def create_gb_aggs_df(df:pd.DataFrame,
-                      gb_cols:List[str],
-                      count_cols = None,
-                      nunique_cols = None,
-                      mean_cols = None,
-                      mean_std_cols = None,
-                      min_max_cols = None,
-                      sum_cols = None,
-                      merge_how = 'outer') -> pd.DataFrame:
+def create_gb_aggs_df(df: pd.DataFrame,
+                      gb_cols: list[str],
+                      count_cols=None,
+                      nunique_cols=None,
+                      mean_cols=None,
+                      mean_std_cols=None,
+                      min_max_cols=None,
+                      sum_cols=None,
+                      mod_cols=None,
+                      merge_how='outer') -> pd.DataFrame:
     """
     Context: Sometimes we want to perform different aggregation for different columns and see them together.
     
@@ -272,14 +301,14 @@ def create_gb_aggs_df(df:pd.DataFrame,
         2. gb_cols: Columns used for group by/aggregation
         3. count_cols: Columns used to obtain count 
         4. nunique_cols: Columns we're interested in knowing nunique
-        5. mean_cols: Columns we're intrested in knowing average (sometimes having std is too crowded)
+        5. mean_cols: Columns we're interested in knowing average (sometimes having std is too crowded)
         6. mean_std_cols: Columns we're interested in knowing average/mean and std
         7. min_max: Columns we're interested in knowing min and max
         8. sum_cols: Columns we're interested in knowing sum
+        9. mod_cols: Columns we're interested in knowing mode (most frequent value)
         
     Return: Pandas dataframe all the above merged
     """
-    
     dfs = []
     agg_str = []
     if count_cols:
@@ -293,17 +322,17 @@ def create_gb_aggs_df(df:pd.DataFrame,
         agg_str.append('nunique')
         
     if mean_cols:
-        df_gb_nunique = create_gb_df(df, gb_cols, mean_cols, ['mean'])
-        dfs.append(df_gb_nunique)
+        df_gb_mean = create_gb_df(df, gb_cols, mean_cols, ['mean'])
+        dfs.append(df_gb_mean)
         agg_str.append('mean')        
         
     if mean_std_cols:
-        df_gb_mean_std = create_gb_df(df, gb_cols, mean_std_cols, ['mean','std'])
+        df_gb_mean_std = create_gb_df(df, gb_cols, mean_std_cols, ['mean', 'std'])
         dfs.append(df_gb_mean_std)
         agg_str.append('mean-std')
         
     if min_max_cols:
-        df_gb_min_max = create_gb_df(df, gb_cols, min_max_cols, ['min','max'])
+        df_gb_min_max = create_gb_df(df, gb_cols, min_max_cols, ['min', 'max'])
         dfs.append(df_gb_min_max)
         agg_str.append('min-max')
         
@@ -312,53 +341,67 @@ def create_gb_aggs_df(df:pd.DataFrame,
         dfs.append(df_gb_sum)
         agg_str.append('sum')
         
+    if mod_cols:
+        df_gb_mod = create_gb_df(df, gb_cols, mod_cols, ['mod'])
+        df_gb_mod.columns = [col.replace('<lambda>', 'mod') for col in df_gb_mod.columns]
+        dfs.append(df_gb_mod)
+        agg_str.append('mod')
+        
     df_merged = create_merged_df(dfs, gb_cols, merge_how)
     print(f"{agg_str} were performed, and hence {len(dfs)} dfs were merged.")
     
     return df_merged
 
 
-def create_gb_df(df:pd.DataFrame, 
-                 groupby_cols:List[str], 
-                 feature_cols:List[str], 
-                 agg_cols = ['count','mean','median','sum'], 
-                 dropna_opt = True) -> pd.DataFrame:
+def create_gb_df(df: pd.DataFrame, 
+                 groupby_cols: list[str], 
+                 feature_cols: list[str], 
+                 agg_cols=['count', 'mean', 'median', 'sum', 'mod'], 
+                 dropna_opt=True) -> pd.DataFrame:
     """
     Args:
         1. df: Pandas dataframe
         2. groupby_cols: Columns to use for group by/aggregation
         3. feature_cols: Columns to have summary stat with aggregation, 
-            Note that f should be numeric to be able to compute summary stat
-        4. agg_cols: Aggregation/summary stat types = ['count', 'mean', 'std', 'median', 'sum', 'unique','nunique'] etc
+            Note that feature_cols should be numeric to be able to compute summary stats
+        4. agg_cols: Aggregation/summary stat types = ['count', 'mean', 'std', 'median', 'sum', 'unique', 'nunique', 'mod'] etc
         5. dropna_opt: we do not include null vals by default
-        
+
     Return: Pandas dataframe
     """
+    # Custom aggregation to handle 'mod'
+    agg_dict = {}
+    for col in feature_cols:
+        agg_dict[col] = [agg for agg in agg_cols if agg != 'mod']
+        if 'mod' in agg_cols:
+            agg_dict[col].append(lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan)
 
-    df_groupby = df.groupby(groupby_cols, as_index = False, dropna = dropna_opt)[feature_cols].agg(agg_cols)
+    df_groupby = df.groupby(groupby_cols, as_index=False, dropna=dropna_opt).agg(agg_dict)
     df_show = df_groupby
-    df_show.columns = [f'{col[0]}_{col[1]}' for col in df_show.columns]
+    
+    # Rename columns
+    #df_show.columns = [f'{col[0]}_{col[1]}' if isinstance(col, tuple) and col[1] != '<lambda_0>' else f'{col[0]}_mod' if isinstance(col, tuple) else col for col in df_show.columns]
+    
+    # Rename columns
+    df_show.columns = [f'{col[0]}' if col[1] == '' else f'{col[0]}_{col[1]}' if col[1] != '<lambda_0>' else f'{col[0]}_mod' for col in df_show.columns]
 
-    df_return = df_show.reset_index()
+    df_return = df_show.reset_index(drop=True)
 
-    # Add precentage when we want to see the counts or nuniques
+    # Add percentage when we want to see the counts or nuniques
     if (agg_cols == ['count'] or agg_cols == ['nunique'] or agg_cols == ['mean']) and len(feature_cols) == 1:
         # compute percentages for "count" or "nunique"
         # 1. count percentage
         if agg_cols == ['count']:
-            print(f'{feature_cols[0]}_{agg_cols[0]}')
-            df_return['perc [%]'] = np.round(df_return[f'{feature_cols[0]}_{agg_cols[0]}']/
-                                             df_return[f'{feature_cols[0]}_count'].sum()*100,2)
+            df_return['perc [%]'] = np.round(df_return[f'{feature_cols[0]}_{agg_cols[0]}'] /
+                                             df_return[f'{feature_cols[0]}_count'].sum() * 100, 2)
         # 2. unique percentage
-        ## note that denominator is number of unique users, not the simple sum
-        elif agg_cols ==['nunique']:
-            print(f'{feature_cols[0]}_{agg_cols[0]}')
-            df_return['perc [%]'] = np.round(df_return[f'{feature_cols[0]}_nunique']/
-                                     df_return[f'{feature_cols[0]}_nunique'].sum()*100,2)
-#                                     df[feature_cols[0]].nunique()*100,2)
+        # note that denominator is number of unique users, not the simple sum
+        elif agg_cols == ['nunique']:
+            df_return['perc [%]'] = np.round(df_return[f'{feature_cols[0]}_nunique'] /
+                                             df_return[f'{feature_cols[0]}_nunique'].sum() * 100, 2)
 
         # return the results ordered by feature col
-        df_return = df_return.sort_values(by=f'{feature_cols[0]}_{agg_cols[0]}', ascending = False)
+        df_return = df_return.sort_values(by=f'{feature_cols[0]}_{agg_cols[0]}', ascending=False)
 
     return df_return
 
@@ -610,31 +653,55 @@ def draw_histplots(df:pd.DataFrame,
         fig.savefig(savefig_fullname,dpi = savefig_dpi)
 
 
-def load_bq_table_from_df(df:pd.DataFrame,
-                          ds_table_name:str,
-                          project_name:str,
-                         ) -> None:
+def median_absolute_percentage_error(
+    y_true: Union[Sequence[float], np.ndarray],
+    y_pred: Union[Sequence[float], np.ndarray]
+) -> float:
     """
-    Context: Alternative to upload pandas df save as csv and upload it to gcs bucket
-    Reference: https://stackoverflow.com/questions/63200201/create-a-bigquery-table-from-pandas-dataframe-without-specifying-schema-explici
-    
-    Args: 
-        1. df: Pandas dataframe to save
-        2. ds_table_name: Dataset and Table Name in format "{dataset}.{table_name}"
-        3. project_name: Project Name
-          
-    Return: None, Load/Create bq table
+    Calculate the median absolute percentage error (MedAPE).
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        Actual target values. Can be a list, tuple, or NumPy array of floats.
+
+    y_pred : array-like of shape (n_samples,)
+        Predicted target values. Must have the same length as `y_true`.
+
+    Returns
+    -------
+    medape : float
+        The median absolute percentage error as a float value.
+
+    Notes
+    -----
+    - The MedAPE is calculated as the median of the absolute percentage errors between
+      the actual and predicted values.
+    - This metric is useful for assessing the predictive accuracy of regression models,
+      especially when the data contains outliers or is skewed.
+
+    Examples
+    --------
+    >>> y_true = [100, 200, 300, 400, 500]
+    >>> y_pred = [110, 190, 310, 420, 480]
+    >>> median_absolute_percentage_error(y_true, y_pred)
+    0.05
     """
+    y_true = np.array(y_true, dtype=np.float64)
+    y_pred = np.array(y_pred, dtype=np.float64)
     
-    # Load client
-    client = bigquery.Client(project= project_name)
+    # Avoid division by zero
+    epsilon = np.finfo(np.float64).eps
+    y_true_safe = np.where(y_true == 0, epsilon, y_true)
+    
+    # Calculate absolute percentage errors
+    ape = np.abs((y_true - y_pred) / y_true_safe)
+    
+    # Compute median of absolute percentage errors
+    medape = np.median(ape)
+    
+    return medape        
 
-    # Define table name, in format dataset.table_name
-    table = ds_table_name
-
-    # Load data to BQ
-    job = client.load_table_from_dataframe(df, table)        
-        
 
 def normalize_features(X_train: pd.DataFrame, 
                        X_test: pd.DataFrame, 
@@ -644,7 +711,7 @@ def normalize_features(X_train: pd.DataFrame,
     Normalize the specified features in the given DataFrames using standard scaling. This method scales the features 
     of the input DataFrames to have zero mean and unit variance. 
 
-    Args:
+    Arguments:
     - X_train (pd.DataFrame): The training DataFrame containing features to be normalized.
     - X_test (pd.DataFrame): The test DataFrame containing features to be normalized.
     - cols_to_normalize (List[str]): List of column names to be normalized.
@@ -687,7 +754,7 @@ def normalize_features(X_train: pd.DataFrame,
     ordered_columns_test = norm_col_names + non_norm_cols_test
     X_test_normalized = X_test_normalized[ordered_columns_test]
     
-    return X_train_normalized, X_test_normalized, scaler
+    return X_train_normalized, X_test_normalized, scaler    
 
 
 def plot_display_pol_fit(df, x_cols, y_col, degree=1, x_col_lr_plot=None):
@@ -774,132 +841,8 @@ def plot_display_pol_fit(df, x_cols, y_col, degree=1, x_col_lr_plot=None):
                 print(f"Coefficient for degree {i}: {coefficients[i]}")
     print(f"R-squared: {r_squared}")
     print(f"RMSE: {round(rmse, 3)}")
-
-
-def plot_fit_2d_hist(df, x, y, xbinsize=20, xlabel='', ylabel='', fig_size=(10, 6), y_range=[0, 5e5],
-                     b_show_lr_fit_median=True, pol_degree=3, b_show_pol_fit_mean=True, b_show_pol_fit_median=True,
-                     b_save=False, savefig_name="test.png", b_show_min=False, b_show_max=False, b_show_25=False, b_show_75=False):
-    """
-    Plot a 2D histogram with median, mean, and optional polynomial fits.
-
-    Args:
-        - df (pd.DataFrame): DataFrame containing the data.
-        - x (str): Column name for the x-axis data.
-        - y (str): Column name for the y-axis data.
-        - xbinsize (int, optional): Size of the bins along the x-axis. Default is 20.
-        - xlabel (str, optional): Label for the x-axis. Default is an empty string.
-        - ylabel (str, optional): Label for the y-axis. Default is an empty string.
-        - fig_size (tuple, optional): Size of the figure. Default is (10, 6).
-        - y_range (list, optional): Range for the y-axis. Default is [0, 5e5].
-        - b_show_lr_fit_median (bool, optional): Whether to show linear fit for the median. Default is True.
-        - pol_degree (int, optional): Degree of the polynomial for fitting. Default is 3.
-        - b_show_pol_fit_mean (bool, optional): Whether to show polynomial fit for the mean. Default is True.
-        - b_show_pol_fit_median (bool, optional): Whether to show polynomial fit for the median. Default is True.
-        - b_save (bool, optional): Whether to save the figure. Default is False.
-        - savefig_name (str, optional): Name of the file to save the figure. Default is "test.png".
-        - b_show_min (bool, optional): Whether to show the minimum value for each bin. Default is False.
-        - b_show_max (bool, optional): Whether to show the maximum value for each bin. Default is False.
-        - b_show_25 (bool, optional): Whether to show the 25th percentile for each bin. Default is False.
-        - b_show_75 (bool, optional): Whether to show the 75th percentile for each bin. Default is False.
-
-    Returns:
-        tuple: Arrays of x points, polynomial predictions for mean and median, RMSE for mean and median, mean and median coefficients.
-    """
-
-    def scatter_points(x_pts, values, color, marker, label=None, alpha=0.8):
-        """ Helper function to scatter plot points with optional labels. """
-        if label:
-            plt.scatter([], [], c=color, marker=marker, alpha=alpha, label=label)
-        plt.scatter(x_pts, values, c=color, marker=marker, alpha=alpha)
-
-    # Clean the data
-    df = df[[x, y]].dropna()
-    df = df[np.isfinite(df[x]) & np.isfinite(df[y])]
-    df[f'{x}_class'] = df[x] // xbinsize
-
-    plt.figure(figsize=fig_size)
-    plt.scatter(df[x], df[y], alpha=0.1, label='data')
-
-    # Add placeholders for legend
-    scatter_points([], [], 'indigo', 'v', "minimum" if b_show_min else None)
-    scatter_points([], [], 'purple', 'x', "25% percentile" if b_show_25 else None)
-    scatter_points([], [], 'b', 'o', "50% percentile (Median)")
-    scatter_points([], [], 'red', '*', "Mean")
-    scatter_points([], [], 'teal', '+', "75% percentile" if b_show_75 else None)
-    scatter_points([], [], 'green', '^', "maximum" if b_show_max else None)
-
-    y_median, y_mean, x_pts = [], [], []
-    i_min = int(df[x].min() // xbinsize)
-    i_max = int(df[x].max() // xbinsize) + 1
-
-    for i in range(i_min, i_max):
-        frac_rev = df.loc[df[f'{x}_class'] == i][y]
-        if not frac_rev.empty:
-            x_val = (i + 0.5) * xbinsize
-            x_pts.append(x_val)
-            y_median_val = frac_rev.quantile(0.5)
-            y_mean_val = frac_rev.mean()
-            y_median.append(y_median_val)
-            y_mean.append(y_mean_val)
-
-            if b_show_min:
-                scatter_points([x_val], [frac_rev.min()], 'indigo', 'v')
-            if b_show_25:
-                scatter_points([x_val], [frac_rev.quantile(0.25)], 'purple', 'x')
-            scatter_points([x_val], [y_median_val], 'b', 'o')
-            scatter_points([x_val], [y_mean_val], 'red', '*')
-            if b_show_75:
-                scatter_points([x_val], [frac_rev.quantile(0.75)], 'teal', '+')
-            if b_show_max:
-                scatter_points([x_val], [frac_rev.max()], 'green', '^')
-
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.ylim(y_range[0], y_range[1])
-
-    x_pts = np.array(x_pts).reshape(-1, 1)
-    y_median = np.array(y_median)
-    y_mean = np.array(y_mean)
-
-    def fit_and_plot_polynomial(x_data, y_data, degree, label, color):
-        """ Helper function to fit polynomial and plot. """
-        model = Pipeline([('poly', PolynomialFeatures(degree=degree)),
-                          ('linear', LinearRegression(fit_intercept=False))])
-        model.fit(x_data, y_data)
-        y_pred = model.predict(x_data)
-        coeffs = model.named_steps['linear'].coef_
-        rmse = np.sqrt(mean_squared_error(y_data, y_pred))
-        plt.plot(x_data, y_pred, label=label, color=color, alpha=0.8)
-        return coeffs, rmse, y_pred
-
-    mean_coeffs, mean_rmse, model_pred_mean = None, None, None
-    median_coeffs, median_rmse, model_pred_median = None, None, None
-
-    if b_show_lr_fit_median:
-        lr = LinearRegression()
-        lr.fit(x_pts, y_median)
-        plt.plot(x_pts, lr.predict(x_pts), label='Linear Fit on Median', color='orange', alpha=0.8)
-
-    if b_show_pol_fit_mean:
-        mean_coeffs, mean_rmse, model_pred_mean = fit_and_plot_polynomial(x_pts, y_mean, pol_degree, 
-                                                                          f'Pol{pol_degree} Fit on Mean', 'yellow')
-        print("Mean coefficients:", np.round(mean_coeffs, 6))
-        print(f'Mean RMSE: {round(mean_rmse, 3)}')
-
-    if b_show_pol_fit_median:
-        median_coeffs, median_rmse, model_pred_median = fit_and_plot_polynomial(x_pts, y_median, pol_degree, 
-                                                                                f'Pol{pol_degree} Fit on Median', 'cyan')
-        print("Median coefficients:", np.round(median_coeffs, 6))
-        print(f'Median RMSE: {round(median_rmse, 3)}')
-
-    plt.legend(loc='upper left')
-
-    if b_save:
-        plt.savefig(savefig_name, dpi=300)
-
-    return x_pts.flatten(), model_pred_mean, model_pred_median, mean_rmse, median_rmse, mean_coeffs, median_coeffs
-
     
+
 def print_col_uniques(df:pd.DataFrame, 
                       b_print_col_unique = False, 
                       n_unique_min = 0, 
@@ -964,9 +907,81 @@ def print_cor_val(df:pd.DataFrame,
               )
         # if the threshold values are within the correct range
         if np.abs(cor_val)>cor_thr_min and np.abs(cor_val)<cor_thr_max:
-            print(f'cor{c}', np.round(cor_val,3), ', p-val:', np.round(cor_val_p_val,6))    
-            
+            print(f'cor{c}', np.round(cor_val,3), ', p-val:', np.round(cor_val_p_val,6))
+
+
+def print_reg_metrics(
+    y_meas: Union[Sequence[float], np.ndarray],
+    y_pred: Union[Sequence[float], np.ndarray],
+    b_scaled: bool = True
+) -> None:
+    """
+    Calculate and print regression metrics for model evaluation.
+
+    Parameters
+    ----------
+    y_meas : array-like of shape (n_samples,)
+        Actual target values. Can be a list, tuple, or NumPy array of floats.
+
+    y_pred : array-like of shape (n_samples,)
+        Predicted target values. Must have the same length as `y_meas`.
+
+    b_scaled : bool, optional (default=True)
+        Indicates whether the data has been scaled. If `b_scaled` is False,
+        the function will also compute percentage-based metrics such as MAPE
+        and MedAPE.
+
+    Returns
+    -------
+    None
+        This function prints the regression metrics and does not return any value.
+
+    Notes
+    -----
+    - The function computes and prints the following regression metrics:
+        - Root Mean Squared Error (RMSE)
+        - Explained Variance Score
+        - R-squared (R²)
+    - If `b_scaled` is False, it additionally computes:
+        - Mean Absolute Percentage Error (MAPE)
+        - Median Absolute Percentage Error (MedAPE)
+    - The MAPE and MedAPE are multiplied by 100 to express them as percentages.
+    - The function assumes that the inputs are numeric and does not perform
+      input validation.
+
+    Examples
+    --------
+    >>> y_true = [3.0, -0.5, 2.0, 7.0]
+    >>> y_pred = [2.5, 0.0, 2.0, 8.0]
+    >>> print_reg_metrics(y_true, y_pred, b_scaled=False)
+    Root Mean Squared Error (RMSE): 0.612
+    Explained Variance Score: 0.957
+    R-squared: 0.948
+    Mean Absolute Percentage Error (MAPE)*: 12.5%
+    Median Absolute Percentage Error (MedAPE)*: 10.0%
+    """
+    mse = mean_squared_error(y_meas, y_pred)
+    rmse = np.sqrt(mse)
+    explained_score = explained_variance_score(y_meas, y_pred)
+    r2 = r2_score(y_meas, y_pred)
+    # percentage error
+    pe = compute_percentage_errors(y_meas, y_pred)
     
+    print(f"Root Mean Squared Error (RMSE): {round(rmse, 3)}")
+    print(f"Explained Variance Score: {round(explained_score, 3)}")
+    print(f"R-squared: {round(r2, 3)}")
+    
+    if not b_scaled:
+        mape = mean_absolute_percentage_error(y_meas, y_pred)
+        print(f"Mean Absolute Percentage Error (MAPE)*: {round(mape * 100, 1)}%")
+        medape = median_absolute_percentage_error(y_meas, y_pred)
+        print(f"Median Absolute Percentage Error (MedAPE)*: {round(medape * 100, 1)}%")
+        mpe = pe.mean()
+        print(f"Mean Percentage Error (MPE)*: {round(mpe, 1)}%")        
+        medpe = np.median(pe)
+        print(f"Median Percentage Error (MedPE)*: {round(medpe, 1)}%")
+
+
 def standardize_columns(df:pd.DataFrame) -> None:
     """
     Input: Pandas dataframe
@@ -992,6 +1007,7 @@ def standardize_columns(df:pd.DataFrame) -> None:
     df.columns = df.columns.str.replace('/', '_', regex=True)    
     df.columns = df.columns.str.replace('#', 'num', regex=True)
     df.columns = df.columns.str.replace('1st', 'first', regex=True) # patsy doesn't like start with number
+
     
 def standardize_column_values(df:pd.DataFrame,
                               st_cols:List[str]) -> None:
@@ -1032,3 +1048,73 @@ def upload_file_to_gcs(local_filename:str,
     bucket = client.get_bucket(bucket_name)
     blob = bucket.blob(blob_name)  # This defines the path where the file will be stored in the bucket
     blob.upload_from_filename(filename = local_filename)    
+
+
+def upload_df_to_bq(
+    df: pd.DataFrame,
+    project_id: str,
+    dataset_id: str,
+    table_id: str,
+    schema: Optional[List[bigquery.SchemaField]] = None,
+    credentials_path: Optional[str] = None
+) -> None:
+    """
+    Upload a DataFrame to BigQuery with specific configuration.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing state-level clusters
+    project_id : str
+        GCP project ID
+    dataset_id : str
+        BigQuery dataset ID
+    table_id : str
+        BigQuery table ID
+    schema : Optional[List[bigquery.SchemaField]]
+        List of BigQuery SchemaField objects defining the table schema.
+        If None, schema will be inferred from DataFrame.
+    credentials_path : Optional[str]
+        Path to service account credentials JSON file
+    """
+    # Initialize BigQuery client
+    if credentials_path:
+        credentials = service_account.Credentials.from_service_account_file(credentials_path)
+        client = bigquery.Client(project=project_id, credentials=credentials)
+    else:
+        client = bigquery.Client(project=project_id)
+
+    # Full table reference
+    table_ref = f"{project_id}.{dataset_id}.{table_id}"
+    
+    # Configure the load job
+    job_config = bigquery.LoadJobConfig(
+        schema=schema,  # Will be None if not provided, letting BQ infer schema
+        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
+    )
+    
+    try:
+        # Load the data
+        job = client.load_table_from_dataframe(
+            df, 
+            table_ref,
+            job_config=job_config
+        )
+        job.result()  # Wait for the job to complete
+        
+        # Get table info and print results
+        table = client.get_table(table_ref)
+        print(f"Loaded {table.num_rows} rows into {table_ref}")
+        
+        # Print schema if it was inferred
+        if schema is None:
+            print("\nInferred schema:")
+            for field in table.schema:
+                print(f"{field.name}: {field.field_type}")
+        
+    except Exception as e:
+        print(f"Error uploading to BigQuery: {str(e)}")
+        print(f"DataFrame dtypes:\n{df.dtypes}")
+        raise
+    finally:
+        client.close()        
